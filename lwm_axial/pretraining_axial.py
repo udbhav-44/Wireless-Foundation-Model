@@ -66,6 +66,7 @@ def parse_args():
     parser.add_argument("--val-ratio", type=float, default=0.2)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--weight-decay", type=float, default=1e-5)
+    parser.add_argument("--grad-clip", type=float, default=1.0)
     parser.add_argument("--step-size", type=int, default=10)
     parser.add_argument("--gamma", type=float, default=0.9)
     parser.add_argument("--seed", type=int, default=0)
@@ -75,7 +76,7 @@ def parse_args():
     parser.add_argument("--prefetch-factor", type=int, default=4)
     parser.add_argument("--persistent-workers", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--pin-memory", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--amp", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--amp", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--tf32", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument(
         "--cudnn-benchmark", action=argparse.BooleanOptionalAction, default=True
@@ -178,6 +179,7 @@ def train_epoch(
     epoch_idx=0,
     non_blocking=False,
     scheduler_step_per_batch=True,
+    grad_clip=0.0,
 ):
     model.train()
     running_loss = 0.0
@@ -213,10 +215,15 @@ def train_epoch(
 
         if amp and scaler is not None:
             scaler.scale(loss).backward()
+            if grad_clip > 0:
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
             scaler.step(optimizer)
             scaler.update()
         else:
             loss.backward()
+            if grad_clip > 0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
             optimizer.step()
 
         if scheduler is not None and scheduler_step_per_batch:
@@ -388,7 +395,7 @@ def main():
     optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scheduler = StepLR(optimizer, step_size=args.step_size, gamma=args.gamma)
     amp_enabled = bool(args.amp and device.startswith("cuda"))
-    scaler = torch.cuda.amp.GradScaler(enabled=amp_enabled)
+    scaler = torch.amp.GradScaler('cuda', enabled=amp_enabled)
     non_blocking = pin_memory and device.startswith("cuda")
 
     log_file = args.log_file
@@ -457,6 +464,7 @@ def main():
             epoch_idx=epoch,
             non_blocking=non_blocking,
             scheduler_step_per_batch=args.scheduler_step_per_batch,
+            grad_clip=args.grad_clip,
         )
         if scheduler is not None and not args.scheduler_step_per_batch:
             scheduler.step()
