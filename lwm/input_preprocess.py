@@ -92,31 +92,52 @@ def deepmimo_data_cleaning(deepmimo_data):
 
 #%% Patch Creation
 def patch_maker(original_ch, patch_size=16, norm_factor=1e6, snr_db=None):
-    """
-    Creates patches from the dataset based on the scenario.
-
-    Args:-
-        patch_size (int): Size of each patch.
-        scenario (str): Selected scenario for data generation.
-        gen_deepMIMO_data (bool): Whether to generate DeepMIMO data.
-        norm_factor (int): Normalization factor for channels.
-
-    Returns:
-        patch (numpy array): Generated patches.
-    """
-    flat_channels = original_ch.reshape((original_ch.shape[0], -1)).astype(np.csingle)
-    if snr_db is not None:
-        flat_channels += generate_gaussian_noise(flat_channels, snr_db)
-        
-    flat_channels_complex = np.hstack((flat_channels.real, flat_channels.imag))
-        
-    # Create patches
-    n_patches = flat_channels_complex.shape[1] // patch_size
-    patch = np.zeros((len(flat_channels_complex), n_patches, patch_size))
-    for idx in range(n_patches):
-        patch[:, idx, :] = flat_channels_complex[:, idx * patch_size:(idx + 1) * patch_size]
+    """  
+    Creates structured patches from CSI data matching channels_to_patches logic.
     
-    return patch
+    Patch ordering: Ant0_Real_P0, Ant0_Real_P1, Ant0_Imag_P0, Ant0_Imag_P1, Ant1_...
+    
+    Args:
+        original_ch (np.ndarray): Complex channels of shape (N, 1, H, W) or (N, H, W)
+        patch_size (int): Size of each patch (default: 16)
+        norm_factor (int): Normalization factor (unused, kept for compatibility)
+        snr_db (float): SNR in dB for noise injection (optional)
+    
+    Returns:
+        np.ndarray: Structured patches of shape (N, num_patches, patch_size)
+    """
+    # Handle shape variations
+    if original_ch.ndim == 3:
+        # (N, H, W) -> (N, 1, H, W)
+        original_ch = np.expand_dims(original_ch, axis=1)
+    
+    batch_size, _, n_ant, n_sub = original_ch.shape
+    
+    # Add noise if requested (before splitting into real/imag)
+    if snr_db is not None:
+        flat_channels = original_ch.reshape((batch_size, -1)).astype(np.csingle)
+        flat_channels += generate_gaussian_noise(flat_channels, snr_db)
+        original_ch = flat_channels.reshape((batch_size, 1, n_ant, n_sub))
+    
+    # Split into real and imag: (N, 2, H, W)
+    channels_ri = np.stack([original_ch.real, original_ch.imag], axis=1).squeeze(2)  # (N, 2, n_ant, n_sub)
+    
+    # Apply structured patching logic matching channels_to_patches
+    # 1. Permute to [N, Ant, 2, Sub]
+    x = np.transpose(channels_ri, (0, 2, 1, 3))  # (N, 32, 2, 32)
+    
+    # 2. Reshape subcarriers into patches
+    n_patches_per_sub = n_sub // patch_size
+    x = x.reshape(batch_size, n_ant, 2, n_patches_per_sub, patch_size)
+    
+    # 3. Flatten Component and FreqPatch dimensions
+    # Inner order: Real_P0, Real_P1, Imag_P0, Imag_P1
+    x = x.reshape(batch_size, n_ant, 2 * n_patches_per_sub, patch_size)
+    
+    # 4. Flatten all patches: (N, 128, 16)
+    patches = x.reshape(batch_size, -1, patch_size)
+    
+    return patches.astype(np.float32)
 
 #%% Data Generation for Scenario Areas
 def DeepMIMO_data_gen(scenario, dataset_folder=None):

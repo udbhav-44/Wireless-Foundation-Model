@@ -183,3 +183,9 @@ python lwm_ca/benchmark.py --compare base ca --save-csv results/benchmark_result
 ```
 python lwm_ca/plot_benchmark_results.py --csv results/benchmark_results.csv --out results/benchmark_plot.png
 ```
+
+
+
+```bash
+python3 -m lwm_axial.pretraining_axial     --save-path lwm_axial/model_weights_axial.pth     --tb-logdir runs/lwm_axial_pretraining     --batch-size 512     --channels-cache /tmp/channels_ri.npy --save-every 5 --no-scheduler-step-per-batch --tensorboard  --lr 1e-4
+```

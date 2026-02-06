@@ -168,27 +168,31 @@ class EncoderLayer(nn.Module):
 
     def forward(self, enc_inputs):
         # Pre-Norm Architecture: x = x + Attn(Norm(x))
+        # Split CLS and Grid
+        cls_token = enc_inputs[:, :1, :]  # [B, 1, D]
+        grid_tokens = enc_inputs[:, 1:, :]  # [B, 128, D]
+        
         norm_inputs = self.norm(enc_inputs)
-        attn_outputs, attn = self.enc_self_attn(norm_inputs)
+        cls_out, grid_out = self.enc_self_attn(norm_inputs)
         
-        # Residual is handled inside enc_self_attn IF it does `residual + out`.
-        # However, for pure Pre-Norm, usually Attn(x) returns just the delta.
-        # My AxialSoftmaxAttention currently returns `residual + out` (Post-norm style logic).
-        # User requested Pre-Norm.
-        # PRE-NORM: Input -> Norm -> Attn -> Add to Input.
-        # So I should pass `enc_inputs` (un-normed) as residual?
-        # NO. AxialSoftmaxAttention is complex. 
-        # I will change AxialSoftmax to simply return the `Attn(Norm(x))` result WITHOUT adding residual inside.
-        # And I will add residual HERE.
+        # Apply CLS mixing + residuals (Issue 3 fix)
+        # CLS update: add grid mean
+        if cls_out is not None:
+            cls_token = cls_token + cls_out  # [B, 1, D]
+            # Grid update: add attention output + broadcast CLS
+            grid_tokens = grid_tokens + grid_out + cls_out  # [B, 128, D]
+        else:
+            grid_tokens = grid_tokens + grid_out
+            
+        # Recombine
+        enc_outputs = torch.cat([cls_token, grid_tokens], dim=1)
         
-        enc_outputs = enc_inputs + attn_outputs # Residual 1
-        
-        # FFN
+        # FFN (same Pre-Norm pattern)
         norm_outputs = self.norm(enc_outputs)
         ffn_outputs = self.pos_ffn(norm_outputs)
         
         enc_outputs = enc_outputs + ffn_outputs # Residual 2
-        return enc_outputs, attn
+        return enc_outputs, None  # attn is not used
 
 class lwm(torch.nn.Module):
     def __init__(self, element_length=16, d_model=64, max_len=129, n_layers=12):
@@ -201,6 +205,8 @@ class lwm(torch.nn.Module):
         embed_weight = self.embedding.proj.weight
         d_model, n_dim = embed_weight.size()
         self.decoder = nn.Linear(d_model, n_dim, bias=False)
+        # Tie weights (Issue 4 fix)
+        self.decoder.weight = self.embedding.proj.weight
         self.decoder_bias = nn.Parameter(torch.zeros(n_dim))
 
     @classmethod

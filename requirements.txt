@@ -3,3 +3,6 @@ numpy
 tensorboard
 scipy
 tqdm
+scikit-learn
+deepmimo 
+umap-learn
