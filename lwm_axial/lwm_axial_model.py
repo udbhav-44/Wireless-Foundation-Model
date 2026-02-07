@@ -105,44 +105,12 @@ class Embedding(nn.Module):
         embedding = tok_emb + full_pos_emb
         return embedding # No Norm here
 
-class ScaledDotProductAttention(nn.Module):
-    def __init__(self):
-        super().__init__()
-
-    def forward(self, Q, K, V):
-        scores = torch.matmul(Q, K.transpose(-1, -2)) / np.sqrt(D_K)
-        attn = F.softmax(scores, dim=-1)
-        context = torch.matmul(attn, V)
-        return context, attn
-
-class MultiHeadAttention(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.W_Q = nn.Linear(D_MODEL, D_K * N_HEADS)
-        self.W_K = nn.Linear(D_MODEL, D_K * N_HEADS)
-        self.W_V = nn.Linear(D_MODEL, D_V * N_HEADS)
-        self.linear = nn.Linear(N_HEADS * D_V, D_MODEL)
-        self.norm = LayerNormalization(D_MODEL)
-        self.dropout = nn.Dropout(DROPOUT)
-        
-    def forward(self, Q, K, V):
-        residual, batch_size = Q, Q.size(0)
-        q_s = self.W_Q(Q).view(batch_size, -1, N_HEADS, D_K).transpose(1, 2)
-        k_s = self.W_K(K).view(batch_size, -1, N_HEADS, D_K).transpose(1, 2)
-        v_s = self.W_V(V).view(batch_size, -1, N_HEADS, D_V).transpose(1, 2)
-
-        context, attn = ScaledDotProductAttention()(q_s, k_s, v_s)
-        output = context.transpose(1, 2).contiguous().view(batch_size, -1, N_HEADS * D_V)
-        output = self.linear(output)
-        return residual + self.dropout(output), attn
-
 class PoswiseFeedForwardNet(nn.Module):
     def __init__(self):
         super().__init__()
         self.fc1 = nn.Linear(D_MODEL, D_FF)
         self.fc2 = nn.Linear(D_FF, D_MODEL)
         self.dropout = nn.Dropout(DROPOUT)
-        self.norm = LayerNormalization(D_MODEL)
 
     def forward(self, x):
         # Return only delta (residual applied in EncoderLayer)
