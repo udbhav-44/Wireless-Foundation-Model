@@ -95,6 +95,111 @@ def split_data(dataset, train_ratio, val_ratio, seed=0):
 def default_num_workers():
     return 8
 
+def train_epoch(
+    model,
+    dataloader,
+    optimizer,
+    scheduler=None,
+    device="cuda",
+    amp=False,
+    scaler=None,
+    log_interval=0,
+    log_fn=print,
+    writer=None,
+    epoch_idx=0,
+    rank=0,
+    grad_clip=0.0,
+    scheduler_step_per_batch=True,
+    world_size=1,
+):
+    model.train()
+    running_loss = 0.0
+    criterion = nn.MSELoss()
+    data_time_sum = 0.0
+    step_time_sum = 0.0
+    samples_sum = 0
+    log_loss = 0.0
+    log_data_time = 0.0
+    log_step_time = 0.0
+    log_samples = 0
+
+    end = time.perf_counter()
+
+    for step, (channels,) in enumerate(dataloader):
+        data_time = time.perf_counter() - end
+        data_time_sum += data_time
+        log_data_time += data_time
+
+        channels = channels.to(device, non_blocking=True)
+        torch.cuda.synchronize()
+        start = time.perf_counter()
+
+        optimizer.zero_grad(set_to_none=True)
+        if torch_amp is not None:
+            autocast_ctx = torch_amp.autocast(device_type="cuda", enabled=amp)
+        else:
+            autocast_ctx = torch.cuda.amp.autocast(enabled=amp)
+        with autocast_ctx:
+            logits_lm, masked_tokens, _ = model(channels)
+            loss = criterion(logits_lm, masked_tokens) / torch.var(masked_tokens)
+
+        if amp and scaler is not None:
+            scaler.scale(loss).backward()
+            if grad_clip > 0:
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            loss.backward()
+            if grad_clip > 0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+            optimizer.step()
+
+        if scheduler is not None and scheduler_step_per_batch:
+            scheduler.step()
+
+        torch.cuda.synchronize()
+        step_time = time.perf_counter() - start
+        step_time_sum += step_time
+        log_step_time += step_time
+
+        batch_size = channels.size(0)
+        samples_sum += batch_size
+        log_samples += batch_size
+
+        running_loss += loss.item()
+        log_loss += loss.item()
+
+        if log_interval and (step + 1) % log_interval == 0 and rank == 0:
+            avg_loss = log_loss / log_interval
+            avg_data = log_data_time / log_interval
+            avg_step = log_step_time / log_interval
+            throughput = log_samples * world_size / log_step_time if log_step_time > 0 else 0.0
+            if writer is not None:
+                global_step = epoch_idx * len(dataloader) + step + 1
+                writer.add_scalar("train/loss_step", avg_loss, global_step)
+                writer.add_scalar("train/data_time_ms", avg_data * 1000, global_step)
+                writer.add_scalar("train/step_time_ms", avg_step * 1000, global_step)
+                writer.add_scalar("train/throughput", throughput, global_step)
+                writer.add_scalar("train/lr", optimizer.param_groups[0]["lr"], global_step)
+            log_fn(
+                f"  step {step + 1:>5}/{len(dataloader)} | "
+                f"loss {avg_loss:.4f} | "
+                f"data {avg_data * 1000:.1f} ms | "
+                f"step {avg_step * 1000:.1f} ms | "
+                f"{throughput:.1f} samples/s"
+            )
+            log_loss = 0.0
+            log_data_time = 0.0
+            log_step_time = 0.0
+            log_samples = 0
+
+        end = time.perf_counter()
+
+    avg_loss = running_loss / len(dataloader)
+    return avg_loss
+
 def parse_args():
     parser = argparse.ArgumentParser(description="DDP Pretraining for Axial LWM.")
     # ... Copy args from original ...
