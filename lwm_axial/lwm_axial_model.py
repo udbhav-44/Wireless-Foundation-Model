@@ -20,17 +20,12 @@ FREQ_GROUPS = 4 # 32 * 4 = 128 (closest to 129)
 from .axial_linear_att import AxialSoftmaxAttention
 
 class LayerNormalization(nn.Module):
-    def __init__(self, d_model: int, eps: float = 1e-6) -> None:
+    def __init__(self, d_model: int):
         super().__init__()
-        self.eps = eps
-        self.alpha = nn.Parameter(torch.ones(d_model))
-        self.bias = nn.Parameter(torch.zeros(d_model))
+        self.norm = nn.LayerNorm(d_model, eps=1e-6)
 
     def forward(self, x):
-        mean = x.mean(dim=-1, keepdim=True)
-        # Use unbiased=False to match nn.LayerNorm (population std, not sample std)
-        std = x.std(dim=-1, keepdim=True, unbiased=False)
-        return self.alpha * (x - mean) / (std + self.eps) + self.bias
+        return self.norm(x)
 
 class Embedding(nn.Module):
     def __init__(self, element_length, d_model, max_len, antennas=32, freq_groups=4):
