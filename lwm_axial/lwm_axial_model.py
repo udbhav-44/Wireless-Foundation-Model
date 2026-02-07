@@ -129,36 +129,32 @@ class EncoderLayer(nn.Module):
             dropout=DROPOUT
         )
         self.pos_ffn = PoswiseFeedForwardNet()
-        self.norm = LayerNormalization(D_MODEL)
+        self.norm1 = LayerNormalization(D_MODEL)  # For attention
+        self.norm2 = LayerNormalization(D_MODEL)  # For FFN
 
-    def forward(self, enc_inputs):
-        # Pre-Norm Architecture: x = x + Attn(Norm(x))
-        norm_inputs = self.norm(enc_inputs)
-        cls_out, grid_out = self.enc_self_attn(norm_inputs)
+    def forward(self, x):
+        # ---- Attention block (true Pre-Norm) ----
+        x_norm = self.norm1(x)
+        cls_out, grid_out = self.enc_self_attn(x_norm)
         
-        # Step 1: Rebuild delta same shape as enc_inputs
         if cls_out is not None:
-            delta = torch.cat([cls_out, grid_out], dim=1)  # [B, 129, D]
+            delta = torch.cat([cls_out, grid_out], dim=1)
         else:
-            # If no CLS, grid_out is the full delta
             delta = grid_out
         
-        # Step 2: Standard Pre-Norm residual on FULL tensor
-        enc_outputs = enc_inputs + delta
+        x = x + delta
         
-        # Step 3: CLS mixing on POST-RESIDUAL tokens (scaled to prevent dominance)
+        # CLS mixing after attention
         if cls_out is not None:
-            cls = enc_outputs[:, :1, :]   # [B, 1, D] - updated CLS
-            grid = enc_outputs[:, 1:, :]  # [B, 128, D]
-            grid = grid + 0.5 * cls  # Scaled global context propagation
-            enc_outputs = torch.cat([cls, grid], dim=1)
+            cls = x[:, :1, :]
+            grid = x[:, 1:, :]
+            grid = grid + 0.5 * cls
+            x = torch.cat([cls, grid], dim=1)
         
-        # FFN (same Pre-Norm pattern)
-        norm_outputs = self.norm(enc_outputs)
-        ffn_outputs = self.pos_ffn(norm_outputs)
+        # ---- FFN block (true Pre-Norm) ----
+        x = x + self.pos_ffn(self.norm2(x))
         
-        enc_outputs = enc_outputs + ffn_outputs  # Residual 2
-        return enc_outputs, None
+        return x, None
 
 class lwm(torch.nn.Module):
     def __init__(self, element_length=16, d_model=64, max_len=129, n_layers=12):
