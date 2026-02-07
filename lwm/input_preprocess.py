@@ -322,6 +322,9 @@ def get_parameters(scenario, dataset_folder=None):
 def make_sample(user_idx, patch, word2id, n_patches, n_masks, patch_size, gen_raw=False):
     """
     Generates a sample for each user, including masking and tokenizing.
+    
+    Uses antenna-local masking: Real/Imag pairs are at offset +2.
+    Patch layout: Ant0_R0, Ant0_R1, Ant0_I0, Ant0_I1, Ant1_R0, ...
 
     Args:
         user_idx (int): Index of the user.
@@ -339,10 +342,15 @@ def make_sample(user_idx, patch, word2id, n_patches, n_masks, patch_size, gen_ra
     tokens = patch[user_idx]
     input_ids = np.vstack((word2id['[CLS]'], tokens))
     
-    real_tokens_size = int(n_patches / 2)
-    masks_pos_real = np.random.choice(range(0, real_tokens_size), size=n_masks, replace=False)
-    masks_pos_imag = masks_pos_real + real_tokens_size
-    masked_pos = np.hstack((masks_pos_real, masks_pos_imag)) + 1
+    # Antenna-local masking (matching Torch pipeline)
+    # Valid real positions: 0,1,4,5,8,9,... (indices 0,1 per 4-block)
+    # Formula: ant * 4 + sub, where ant in [0..31], sub in [0..1]
+    n_antennas = 32  # Assuming 32 antennas
+    valid_real = np.array([ant * 4 + sub for ant in range(n_antennas) for sub in range(2)])
+    
+    masks_pos_real = np.random.choice(valid_real, size=n_masks, replace=False)
+    masks_pos_imag = masks_pos_real + 2  # Imag pair is +2 offset
+    masked_pos = np.hstack((masks_pos_real, masks_pos_imag)) + 1  # +1 for CLS
     
     masked_tokens = []
     for pos in masked_pos:
