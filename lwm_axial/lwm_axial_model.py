@@ -87,6 +87,7 @@ class Embedding(nn.Module):
         
         # 3. Replace MASK tokens with learnable embedding
         if masked_pos is not None:
+            masked_pos = masked_pos.long()
             mask_tokens = self.mask_token.to(dtype=tok_emb.dtype).expand(B, masked_pos.shape[1], -1)
             batch_idx = torch.arange(B, device=x.device).unsqueeze(1).expand_as(masked_pos)
             tok_emb[batch_idx, masked_pos] = mask_tokens
@@ -169,11 +170,13 @@ class lwm(torch.nn.Module):
         self.linear = nn.Linear(d_model, d_model)
         self.norm = LayerNormalization(d_model)
 
-        # Decoder shares embedding projection weight (transposed)
-        # embedding.proj: [element_length, d_model] -> weight is [d_model, element_length]
-        # decoder needs: [d_model, element_length] (weight.T in forward)
+        # Untied Decoder: Explicit Linear Layer
         self.element_length = element_length
+        self.decoder = nn.Linear(d_model, element_length)
         self.decoder_bias = nn.Parameter(torch.zeros(element_length))
+        
+        # Initialize decoder with small variance for regression stability
+        nn.init.xavier_uniform_(self.decoder.weight)
 
     @classmethod
     def from_pretrained(cls, ckpt_name='model_weights.pth', device='cuda', use_auth_token=None):
@@ -190,10 +193,12 @@ class lwm(torch.nn.Module):
         for layer in self.layers:
             output, _ = layer(output)
 
+
         masked_pos = masked_pos.long()[:, :, None].expand(-1, -1, output.size(-1))
         h_masked = torch.gather(output, 1, masked_pos)
         h_masked = self.norm(F.relu(self.linear(h_masked)))
-        # Use transposed embedding weight for decoding
-        logits_lm = F.linear(h_masked, self.embedding.proj.weight.T) + self.decoder_bias
+        
+        # Untied Decoder (for regression tasks)
+        logits_lm = self.decoder(h_masked) + self.decoder_bias
 
         return logits_lm, output
