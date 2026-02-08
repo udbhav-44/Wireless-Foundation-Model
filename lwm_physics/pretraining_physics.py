@@ -351,6 +351,13 @@ def main():
         avg_loss = train_epoch(model, train_loader, optimizer, scheduler, device, args.amp, scaler, args.log_interval, log, writer, epoch, rank, args.grad_clip, args.scheduler_step_per_batch, world_size)
         log(f"Train Loss: {avg_loss:.4f}")
         
+        # Log Lambda (Check if it's changing)
+        if hasattr(model, "module"):
+            current_lambda = model.module.lambda_scalar.item()
+        else:
+            current_lambda = model.lambda_scalar.item()
+        log(f"Current Physics Lambda: {current_lambda:.6f}")
+        
         if not args.scheduler_step_per_batch:
             scheduler.step()
             
