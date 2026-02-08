@@ -284,7 +284,7 @@ class EncoderLayer(nn.Module):
 
 class lwm_physics(torch.nn.Module):
     def __init__(self, element_length=16, d_model=64, max_len=129, n_layers=12, 
-                 lambda_init=0.5, antennas=32, freq_groups=4):
+                 lambda_init=0.3, antennas=32, freq_groups=4):
         super().__init__()
         self.embedding = Embedding(element_length, d_model, max_len)
         
