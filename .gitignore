@@ -15,3 +15,7 @@ results/
 # OS files
 .DS_Store
 *.pth
+
+# Benchmarks
+lwm_benchmark/cache/
+lwm_benchmark/repro_hang.py

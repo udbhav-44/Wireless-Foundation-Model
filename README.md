@@ -186,6 +186,28 @@ python lwm_ca/plot_benchmark_results.py --csv results/benchmark_results.csv --ou
 
 
 
+
 ```bash
 python3 -m lwm_axial.pretraining_axial     --save-path lwm_axial/model_weights_axial.pth     --tb-logdir runs/lwm_axial_pretraining     --batch-size 512     --channels-cache /tmp/channels_ri.npy --save-every 5 --no-scheduler-step-per-batch --tensorboard  --lr 1e-4
 ```
+
+---
+
+## Dataset Details: O1_3p5B
+
+The `O1_3p5B` scenario is a key dataset for benchmarking `LWM`.
+
+- **Scenario Type**: Outdoor 3.5GHz
+- **Dimensions**:
+  - **Rows**: 2751
+  - **Users per Row**: 181
+  - **Total Users**: ~498,000
+- **Antenna Configuration**:
+  - **Base Station**: 32 Antennas (Vertical array)
+  - **User Equipment**: 1 Antenna
+- **OFDM**:
+  - **Subcarriers**: 32
+  - **Bandwidth**: Scaled based on SCS (30kHz)
+- **Path Features**:
+  - **Grid**: Random uniform sampling capable
+  - **Multipath**: Top 20 paths considered

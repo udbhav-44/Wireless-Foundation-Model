@@ -121,15 +121,15 @@ import matplotlib.pyplot as plt
 from sklearn.metrics import f1_score
 
 # Data Preparation
-def get_data_loaders(data_tensor, labels_tensor, batch_size=32, split_ratio=0.8):
+def get_data_loaders(data_tensor, labels_tensor, batch_size=32, split_ratio=0.8, num_workers=4, pin_memory=True):
     dataset = TensorDataset(data_tensor, labels_tensor)
     
     train_size = int(split_ratio * len(dataset))
     test_size = len(dataset) - train_size
     train_dataset, test_dataset = random_split(dataset, [train_size, test_size])
 
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=pin_memory)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=pin_memory)
     
     return train_loader, test_loader
 
