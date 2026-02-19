@@ -4,6 +4,119 @@ import torch.nn.functional as F
 import numpy as np
 from lwm_physics.physics_priors import compute_physics_bias
 
+# ==========================================
+# Preprocessing Helpers (Ported from torch_pipeline_axial)
+# ==========================================
+
+def ensure_ri_channels(channels):
+    """
+    Normalize channels to (B, 2, H, W) float tensor (real, imag).
+    Accepts complex (B, H, W) or real (B, 2, H, W).
+    """
+    if channels.dim() == 5 and channels.size(2) == 1:
+        channels = channels.squeeze(2)
+    if channels.is_complex():
+        real = channels.real
+        imag = channels.imag
+        return torch.stack([real, imag], dim=1).float()
+
+    if channels.dim() == 4 and channels.size(1) == 2:
+        return channels.float()
+
+    if channels.dim() == 4 and channels.size(1) == 1:
+        zeros = torch.zeros_like(channels)
+        return torch.cat([channels, zeros], dim=1).float()
+
+    if channels.dim() == 3:
+        zeros = torch.zeros_like(channels)
+        return torch.stack([channels, zeros], dim=1).float()
+
+    raise ValueError(f"Unsupported channel shape: {tuple(channels.shape)}")
+
+def channels_to_patches(channels_ri, patch_size=16):
+    """
+    Convert (B, 2, Ant, Sub) into patches ordered by [Antenna, Component, Freq].
+    Input: (B, 2, 32, 32) real/imag.
+    Output: (B, 128, 16) flattened patches.
+    """
+    batch_size, channels, n_ant, n_sub = channels_ri.shape
+    
+    # 1. Permute to [B, Ant, 2, Sub]
+    x = channels_ri.permute(0, 2, 1, 3) # [B, 32, 2, 32]
+    
+    # 2. Unfold subcarriers into patches
+    # Sub (32) -> 2 patches of size 16
+    n_patches_per_sub = n_sub // patch_size
+    x = x.reshape(batch_size, n_ant, 2, n_patches_per_sub, patch_size)
+    
+    # 3. Flatten dimensions 2 and 3 (Component and FreqPatch)
+    x = x.reshape(batch_size, n_ant, 2 * n_patches_per_sub, patch_size)
+    
+    # 4. Flatten all patches
+    # [B, 128, 16]
+    return x.reshape(batch_size, -1, patch_size)
+
+def mask_patches(patches, mask_ratio=0.15, gen_raw=False):
+    """
+    Apply MCM-style masking to patches.
+    Returns input_ids, masked_tokens, masked_pos.
+    """
+    batch_size, n_patches, patch_size = patches.shape
+    # Define CLS and Mask token values (fixed for now, model learns embedding replacement)
+    cls_token_val = 0.2
+    mask_token_val = 0.1
+    
+    cls_token = torch.full(
+        (batch_size, 1, patch_size), cls_token_val, device=patches.device, dtype=patches.dtype
+    )
+    input_ids = torch.cat([cls_token, patches], dim=1)
+
+    real_tokens = n_patches // 2
+    n_masks_half = int(mask_ratio * real_tokens)
+    if n_masks_half < 1:
+         # Fallback if too small
+         n_masks_half = 1
+    
+    mask_vec = torch.full((patch_size,), mask_token_val, device=patches.device, dtype=patches.dtype)
+    n_masks = n_masks_half * 2
+
+    # Vectorized Random Selection ensuring Real+Imag pairs
+    rand = torch.rand(batch_size, real_tokens, device=patches.device) 
+    selected_indices = rand.topk(n_masks_half, dim=1).indices # [B, N_Masks_Half]
+    
+    # Map to physical indices (Ant * 4 + SubFreq)
+    pos_real = (selected_indices // 2) * 4 + (selected_indices % 2)
+    pos_imag = pos_real + 2
+    
+    masked_pos = torch.cat([pos_real, pos_imag], dim=1) + 1  # shift for CLS
+    
+    # Gather ground truth
+    masked_tokens = torch.gather(
+        input_ids, 1, masked_pos.unsqueeze(-1).expand(-1, -1, patch_size)
+    ).detach()
+
+    # Apply formatting
+    if not gen_raw:
+        # 80% mask, 10% random, 10% original (BERT style)
+        rand_mask = torch.rand(batch_size, n_masks, device=patches.device)
+        mask_mask = (rand_mask < 0.8)
+        random_mask = (rand_mask >= 0.8) & (rand_mask < 0.9)
+
+        batch_idx = torch.arange(batch_size, device=patches.device)[:, None].expand_as(masked_pos)
+        
+        # Apply MASK token
+        if mask_mask.any():
+            input_ids[batch_idx[mask_mask], masked_pos[mask_mask]] = mask_vec
+            
+        # Apply Random noise
+        if random_mask.any():
+            random_vals = torch.rand(
+                batch_size, n_masks, patch_size, device=patches.device, dtype=patches.dtype
+            )
+            input_ids[batch_idx[random_mask], masked_pos[random_mask]] = random_vals[random_mask]
+
+    return input_ids, masked_tokens, masked_pos
+
 ELEMENT_LENGTH = 16
 D_MODEL = 64
 MAX_LEN = 129
@@ -141,7 +254,16 @@ class lwm_physics(torch.nn.Module):
 
         return model
 
-    def forward(self, input_ids, masked_pos):
+    def forward(self, input_ids, masked_pos=None):
+        # Handle raw channels input (if masked_pos is None, we assume input_ids is channels)
+        masked_tokens = None
+        if masked_pos is None:
+            channels = input_ids
+            # Preprocess: Normalize -> Patch -> Mask
+            channels_ri = ensure_ri_channels(channels)
+            patches = channels_to_patches(channels_ri, patch_size=self.embedding.element_length)
+            input_ids, masked_tokens, masked_pos = mask_patches(patches, mask_ratio=0.15)
+
         output = self.embedding(input_ids)
         for layer in self.layers:
             output, _ = layer(output, self.physics_bias, self.lambda_scalar)
@@ -151,7 +273,7 @@ class lwm_physics(torch.nn.Module):
         h_masked = self.norm(F.relu(self.linear(h_masked)))
         logits_lm = self.decoder(h_masked) + self.decoder_bias
 
-        return logits_lm, output
+        return logits_lm, masked_tokens, output
 
 if __name__ == "__main__":
     # Test
