@@ -207,6 +207,8 @@ def parse_args():
     parser.add_argument("--scenarios", nargs="+", default=["O1_3p5_v1", "O1_3p5_v2", "Boston5G_3p5", "asu_campus1", "city_0_newyork", "city_1_losangeles", "city_2_chicago", "city_3_houston", "city_4_phoenix", "city_5_philadelphia", "city_6_miami", "city_8_dallas", "city_9_sanfrancisco", "city_10_austin", "city_13_columbus", "city_17_seattle"])
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--batch-size", type=int, default=512, help="Per-GPU batch size")
+    parser.add_argument("--n-layers", type=int, default=12)
+    parser.add_argument("--d-model", type=int, default=64)
     parser.add_argument("--train-ratio", type=float, default=0.8)
     parser.add_argument("--val-ratio", type=float, default=0.2)
     parser.add_argument("--lr", type=float, default=1e-4)
