@@ -113,9 +113,13 @@ class PoswiseFeedForwardNet(nn.Module):
         self.dropout = nn.Dropout(DROPOUT)
 
     def forward(self, x):
-        # Return only delta (residual applied in EncoderLayer)
-        output = self.fc2(self.dropout(F.relu(self.fc1(x))))
-        return self.dropout(output)
+        # Correct order: Linear -> ReLU -> Dropout -> Linear -> Dropout
+        x = self.fc1(x)
+        x = F.relu(x)
+        x = self.dropout(x)
+        x = self.fc2(x)
+        x = self.dropout(x)
+        return x
 
 class EncoderLayer(nn.Module):
     def __init__(self):
@@ -131,6 +135,7 @@ class EncoderLayer(nn.Module):
         self.pos_ffn = PoswiseFeedForwardNet()
         self.norm1 = LayerNormalization(D_MODEL)  # For attention
         self.norm2 = LayerNormalization(D_MODEL)  # For FFN
+        self.cls_scale = nn.Parameter(torch.tensor(0.5))  # Learnable CLS mixing scale
 
     def forward(self, x):
         # ---- Attention block (true Pre-Norm) ----
@@ -144,11 +149,11 @@ class EncoderLayer(nn.Module):
         
         x = x + delta
         
-        # CLS mixing after attention
+        # CLS mixing after attention (learnable scale)
         if cls_out is not None:
             cls = x[:, :1, :]
             grid = x[:, 1:, :]
-            grid = grid + 0.5 * cls
+            grid = grid + self.cls_scale * cls
             x = torch.cat([cls, grid], dim=1)
         
         # ---- FFN block (true Pre-Norm) ----
