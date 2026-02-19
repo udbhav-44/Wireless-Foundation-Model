@@ -169,12 +169,11 @@ class lwm(torch.nn.Module):
         self.linear = nn.Linear(d_model, d_model)
         self.norm = LayerNormalization(d_model)
 
-        embed_weight = self.embedding.proj.weight
-        d_model, n_dim = embed_weight.size()
-        self.decoder = nn.Linear(d_model, n_dim, bias=False)
-        # Tie weights (Issue 4 fix)
-        self.decoder.weight = self.embedding.proj.weight
-        self.decoder_bias = nn.Parameter(torch.zeros(n_dim))
+        # Decoder shares embedding projection weight (transposed)
+        # embedding.proj: [element_length, d_model] -> weight is [d_model, element_length]
+        # decoder needs: [d_model, element_length] (weight.T in forward)
+        self.element_length = element_length
+        self.decoder_bias = nn.Parameter(torch.zeros(element_length))
 
     @classmethod
     def from_pretrained(cls, ckpt_name='model_weights.pth', device='cuda', use_auth_token=None):
@@ -194,6 +193,7 @@ class lwm(torch.nn.Module):
         masked_pos = masked_pos.long()[:, :, None].expand(-1, -1, output.size(-1))
         h_masked = torch.gather(output, 1, masked_pos)
         h_masked = self.norm(F.relu(self.linear(h_masked)))
-        logits_lm = self.decoder(h_masked) + self.decoder_bias
+        # Use transposed embedding weight for decoding
+        logits_lm = F.linear(h_masked, self.embedding.proj.weight.T) + self.decoder_bias
 
         return logits_lm, output
