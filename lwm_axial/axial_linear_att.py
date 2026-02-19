@@ -106,20 +106,15 @@ class AxialSoftmaxAttention(nn.Module):
         grid_final = self.dropout(grid_final)
         
         # ---------------------------------------------------------
-        # CLS Mixing (Lightweight Global Context)
+        # CLS Token Update (No Mixing - that happens in EncoderLayer)
         # ---------------------------------------------------------
+        cls_out = None
         if cls_token is not None:
-            # 1. Update CLS with Grid Mean
+            # Update CLS with Grid Mean
             grid_mean = grid_final.mean(dim=1, keepdim=True) # [B, 1, D]
-            cls_out = cls_token + grid_mean
+            cls_out = grid_mean  # Return delta only
             
-            # 2. Update Grid with UPDATED CLS (Broadcast)
-            # This ensures grid sees the global context
-            grid_final = grid_final + cls_out
-            
-            # Reattach
-            out = torch.cat([cls_out, grid_final], dim=1)
-        else:
-            out = grid_final
-            
-        return out, None # match signature
+        # Return attention outputs WITHOUT residuals or mixing
+        # EncoderLayer will handle: grid = grid + grid_final + cls_out
+        return cls_out, grid_final
+
