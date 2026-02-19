@@ -28,7 +28,8 @@ class LayerNormalization(nn.Module):
 
     def forward(self, x):
         mean = x.mean(dim=-1, keepdim=True)
-        std = x.std(dim=-1, keepdim=True)
+        # Use unbiased=False to match nn.LayerNorm (population std, not sample std)
+        std = x.std(dim=-1, keepdim=True, unbiased=False)
         return self.alpha * (x - mean) / (std + self.eps) + self.bias
 
 class Embedding(nn.Module):
