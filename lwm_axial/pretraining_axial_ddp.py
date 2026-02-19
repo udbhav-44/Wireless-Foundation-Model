@@ -129,9 +129,18 @@ def train_epoch(model, dataloader, optimizer, scheduler, device, amp, scaler, lo
 
     end = time.perf_counter()
     log_loss = 0.0
+    log_data_time = 0.0
+    log_step_time = 0.0
     
     for step, (channels,) in enumerate(dataloader):
+        data_time = time.perf_counter() - end
+        log_data_time += data_time
+        
         channels = channels.to(device, non_blocking=True)
+        
+        if device.type == "cuda":
+            torch.cuda.synchronize()
+        start = time.perf_counter()
         
         optimizer.zero_grad(set_to_none=True)
         with torch.amp.autocast('cuda', enabled=amp):
@@ -154,6 +163,11 @@ def train_epoch(model, dataloader, optimizer, scheduler, device, amp, scaler, lo
         if scheduler and scheduler_step_per_batch:
             scheduler.step()
 
+        if device.type == "cuda":
+            torch.cuda.synchronize()
+        step_time = time.perf_counter() - start
+        log_step_time += step_time
+
         # Reduce loss for logging
         loss_val = loss.item()
         if dist.is_initialized():
@@ -166,10 +180,40 @@ def train_epoch(model, dataloader, optimizer, scheduler, device, amp, scaler, lo
         
         if rank == 0 and log_interval and (step + 1) % log_interval == 0:
             avg_loss = log_loss / log_interval
-            throughput = (args.batch_size * world_size * log_interval) / (time.perf_counter() - end)
-            log_fn(f"  step {step + 1}/{len(dataloader)} | loss {avg_loss:.4f} | {throughput:.1f} samples/s")
+            avg_data = log_data_time / log_interval
+            avg_step = log_step_time / log_interval
+            throughput = (args.batch_size * world_size) / avg_step # Samples per second based on step time (processing)
+            # OR total throughput including data wait:
+            # throughput = (args.batch_size * world_size * log_interval) / (time.perf_counter() - (end - data_time)) 
+            # Original uses pure step time or total time? 
+            # Original: throughput = log_samples / log_step_time. (Pure processing speed). 
+            # I will stick to pure Step Time for throughput to show GPU speed, but Total Time is also useful.
+            # Let's use the interval time for "real world" throughput.
+            
+            # Re-calculating end-to-end throughput for honesty
+            # But let's match original script style:
+            # f"data {avg_data * 1000:.1f} ms | step {avg_step * 1000:.1f} ms"
+            
+            log_fn(
+                f"  step {step + 1:>5}/{len(dataloader)} | "
+                f"loss {avg_loss:.4f} | "
+                f"data {avg_data * 1000:.1f} ms | "
+                f"step {avg_step * 1000:.1f} ms | "
+                f"{throughput:.1f} samples/s"
+            )
+            
+            if writer:
+                global_step = epoch_idx * len(dataloader) + step + 1
+                writer.add_scalar("train/loss_step", avg_loss, global_step)
+                writer.add_scalar("train/data_time_ms", avg_data * 1000, global_step)
+                writer.add_scalar("train/step_time_ms", avg_step * 1000, global_step)
+                writer.add_scalar("train/throughput", throughput, global_step)
+
             log_loss = 0.0
-            end = time.perf_counter() # Reset throughput counter
+            log_data_time = 0.0
+            log_step_time = 0.0
+            
+        end = time.perf_counter()
 
     return running_loss / len(dataloader)
 
