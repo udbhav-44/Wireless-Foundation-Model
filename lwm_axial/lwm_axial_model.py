@@ -149,8 +149,9 @@ class PoswiseFeedForwardNet(nn.Module):
         self.norm = LayerNormalization(D_MODEL)
 
     def forward(self, x):
+        # Return only delta (residual applied in EncoderLayer)
         output = self.fc2(self.dropout(F.relu(self.fc1(x))))
-        return x + self.dropout(output)
+        return self.dropout(output)
 
 class EncoderLayer(nn.Module):
     def __init__(self):
@@ -181,11 +182,11 @@ class EncoderLayer(nn.Module):
         # Step 2: Standard Pre-Norm residual on FULL tensor
         enc_outputs = enc_inputs + delta
         
-        # Step 3: CLS mixing on POST-RESIDUAL tokens
+        # Step 3: CLS mixing on POST-RESIDUAL tokens (scaled to prevent dominance)
         if cls_out is not None:
             cls = enc_outputs[:, :1, :]   # [B, 1, D] - updated CLS
             grid = enc_outputs[:, 1:, :]  # [B, 128, D]
-            grid = grid + cls  # Global context propagation
+            grid = grid + 0.5 * cls  # Scaled global context propagation
             enc_outputs = torch.cat([cls, grid], dim=1)
         
         # FFN (same Pre-Norm pattern)
