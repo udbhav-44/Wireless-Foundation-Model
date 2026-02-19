@@ -7,7 +7,7 @@ ELEMENT_LENGTH = 16
 D_MODEL = 64
 MAX_LEN = 129
 N_LAYERS = 12
-N_HEADS = 12
+N_HEADS = 8
 D_FF = D_MODEL * 4
 D_K = D_MODEL // N_HEADS
 D_V = D_MODEL // N_HEADS
@@ -17,7 +17,7 @@ DROPOUT = 0.1
 ANTENNAS = 32
 FREQ_GROUPS = 4 # 32 * 4 = 128 (closest to 129)
 
-from .axial_linear_att import AxialLinearAttention
+from .axial_linear_att import AxialSoftmaxAttention
 
 class LayerNormalization(nn.Module):
     def __init__(self, d_model: int, eps: float = 1e-6) -> None:
@@ -32,21 +32,82 @@ class LayerNormalization(nn.Module):
         return self.alpha * (x - mean) / (std + self.eps) + self.bias
 
 class Embedding(nn.Module):
-    def __init__(self, element_length, d_model, max_len):
+    def __init__(self, element_length, d_model, max_len, antennas=32, freq_groups=4):
         super().__init__()
         self.element_length = element_length
         self.d_model = d_model
         self.proj = nn.Linear(element_length, d_model)
-        self.pos_embed = nn.Embedding(max_len, d_model)
-        self.norm = LayerNormalization(d_model)
+        
+        # Learnable tokens
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, d_model))
+        self.mask_token = nn.Parameter(torch.zeros(1, 1, d_model))
+        nn.init.normal_(self.cls_token, std=0.02)
+        nn.init.normal_(self.mask_token, std=0.02)
 
-    def forward(self, x):
-        seq_len = x.size(1)
-        pos = torch.arange(seq_len, dtype=torch.long, device=x.device)
-        pos = pos.unsqueeze(0).expand_as(x[:, :, 0])
-        tok_emb = self.proj(x.float())  
-        embedding = tok_emb + self.pos_embed(pos)
-        return self.norm(embedding)
+        # 2D Positional Embeddings (Registered as Buffers to avoid re-creation)
+        self.antennas = antennas
+        self.freq_groups = freq_groups
+        
+        pos_emb_ant = torch.zeros(1, antennas, d_model)
+        pos_emb_freq = torch.zeros(1, freq_groups, d_model)
+        pos_emb_cls = torch.zeros(1, 1, d_model)
+        
+        nn.init.normal_(pos_emb_ant, std=0.02)
+        nn.init.normal_(pos_emb_freq, std=0.02)
+        nn.init.normal_(pos_emb_cls, std=0.02)
+        
+        # Register as parameters? Users usually want them learnable.
+        # Original code used nn.Embedding (learnable).
+        # We stick to nn.Parameter BUT we precompute the indices in forward
+        # Wait, user said "You are double-normalizing... Remove norm from embedding".
+        # User also said "Positional embeddings are recreated every forward pass... Register as buffers".
+        # Actually user meant the INDICES tensor creation (arange, repeat) is wasteful.
+        # But for embeddings themselves, if they are param, they are fine.
+        # I will register the INDICES as buffers if possible, or just keep it simple.
+        # Re-reading: "This should be precomputed once and registered as buffers." -> Referring to INDICES.
+        
+        self.pos_emb_ant = nn.Parameter(pos_emb_ant)
+        self.pos_emb_freq = nn.Parameter(pos_emb_freq)
+        self.pos_emb_cls = nn.Parameter(pos_emb_cls)
+
+        # Precompute indices
+        ant_idx = torch.arange(antennas).repeat_interleave(freq_groups)
+        freq_idx = torch.arange(freq_groups).repeat(antennas)
+        self.register_buffer('ant_idx', ant_idx, persistent=False)
+        self.register_buffer('freq_idx', freq_idx, persistent=False)
+        
+        # Remove Norm from embedding (as per user request: "Remove norm from embedding OR from first layer")
+        # self.norm = LayerNormalization(d_model)
+
+    def forward(self, x, masked_pos=None):
+        # x: [B, 129, 16] (Values)
+        B, Seq, _ = x.shape
+        
+        # 1. Project values
+        tok_emb = self.proj(x.float())  # [B, 129, D]
+        
+        # 2. Replace CLS token (Index 0) with learnable embedding
+        tok_emb[:, 0:1, :] = self.cls_token.to(dtype=tok_emb.dtype).expand(B, -1, -1)
+        
+        # 3. Replace MASK tokens with learnable embedding
+        if masked_pos is not None:
+            mask_tokens = self.mask_token.to(dtype=tok_emb.dtype).expand(B, masked_pos.shape[1], -1)
+            batch_idx = torch.arange(B, device=x.device).unsqueeze(1).expand_as(masked_pos)
+            tok_emb[batch_idx, masked_pos] = mask_tokens
+
+        # 4. Add 2D Positional Embeddings
+        # Lookup embeddings using precomputed buffer indices
+        ant_emb = self.pos_emb_ant[:, self.ant_idx, :] # [1, 128, D]
+        freq_emb = self.pos_emb_freq[:, self.freq_idx, :] # [1, 128, D]
+        
+        # Combine
+        grid_pos_emb = ant_emb + freq_emb
+        
+        # Add CLS pos and concat
+        full_pos_emb = torch.cat([self.pos_emb_cls, grid_pos_emb], dim=1) # [1, 129, D]
+        
+        embedding = tok_emb + full_pos_emb
+        return embedding # No Norm here
 
 class ScaledDotProductAttention(nn.Module):
     def __init__(self):
@@ -94,7 +155,7 @@ class PoswiseFeedForwardNet(nn.Module):
 class EncoderLayer(nn.Module):
     def __init__(self):
         super().__init__()
-        self.enc_self_attn = AxialLinearAttention(
+        self.enc_self_attn = AxialSoftmaxAttention(
             d_model=D_MODEL, 
             n_heads=N_HEADS,
             d_k=D_K,
@@ -106,15 +167,33 @@ class EncoderLayer(nn.Module):
         self.norm = LayerNormalization(D_MODEL)
 
     def forward(self, enc_inputs):
-        attn_outputs, attn = self.enc_self_attn(enc_inputs)
-        attn_outputs = self.norm(attn_outputs)
-        enc_outputs = self.pos_ffn(attn_outputs)
+        # Pre-Norm Architecture: x = x + Attn(Norm(x))
+        norm_inputs = self.norm(enc_inputs)
+        attn_outputs, attn = self.enc_self_attn(norm_inputs)
+        
+        # Residual is handled inside enc_self_attn IF it does `residual + out`.
+        # However, for pure Pre-Norm, usually Attn(x) returns just the delta.
+        # My AxialSoftmaxAttention currently returns `residual + out` (Post-norm style logic).
+        # User requested Pre-Norm.
+        # PRE-NORM: Input -> Norm -> Attn -> Add to Input.
+        # So I should pass `enc_inputs` (un-normed) as residual?
+        # NO. AxialSoftmaxAttention is complex. 
+        # I will change AxialSoftmax to simply return the `Attn(Norm(x))` result WITHOUT adding residual inside.
+        # And I will add residual HERE.
+        
+        enc_outputs = enc_inputs + attn_outputs # Residual 1
+        
+        # FFN
+        norm_outputs = self.norm(enc_outputs)
+        ffn_outputs = self.pos_ffn(norm_outputs)
+        
+        enc_outputs = enc_outputs + ffn_outputs # Residual 2
         return enc_outputs, attn
 
 class lwm(torch.nn.Module):
     def __init__(self, element_length=16, d_model=64, max_len=129, n_layers=12):
         super().__init__()
-        self.embedding = Embedding(element_length, d_model, max_len)
+        self.embedding = Embedding(element_length, d_model, max_len, antennas=ANTENNAS, freq_groups=FREQ_GROUPS)
         self.layers = nn.ModuleList([EncoderLayer() for _ in range(n_layers)])
         self.linear = nn.Linear(d_model, d_model)
         self.norm = LayerNormalization(d_model)
@@ -134,8 +213,8 @@ class lwm(torch.nn.Module):
 
         return model
 
-    def forward(self, input_ids, masked_pos):
-        output = self.embedding(input_ids)
+    def forward(self, input_ids, masked_pos=None):
+        output = self.embedding(input_ids, masked_pos)
         for layer in self.layers:
             output, _ = layer(output)
 

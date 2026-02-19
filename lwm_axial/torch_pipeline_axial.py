@@ -60,13 +60,32 @@ def add_complex_noise_ri(channels_ri, snr_db):
 
 
 def channels_to_patches(channels_ri, patch_size=16):
-    """Convert (B, 2, H, W) into patches (B, n_patches, patch_size)."""
-    batch_size, _, height, width = channels_ri.shape
-    flat = channels_ri.view(batch_size, 2, height * width)
-    flat = torch.cat([flat[:, 0], flat[:, 1]], dim=1)
-    if flat.size(1) % patch_size != 0:
-        raise ValueError("Flattened channel length is not divisible by patch size.")
-    return flat.view(batch_size, -1, patch_size)
+    """
+    Convert (B, 2, Ant, Sub) into patches ordered by [Antenna, Component, Freq].
+    Input: (B, 2, 32, 32) real/imag.
+    Output: (B, 128, 16) flattened patches.
+    sequence: Ant0_Real_P0, Ant0_Real_P1, Ant0_Imag_P0, Ant0_Imag_P1, Ant1...
+    """
+    batch_size, channels, n_ant, n_sub = channels_ri.shape
+    
+    # 1. Permute to [B, Ant, 2, Sub]
+    # We want Antenna as the outer dimension.
+    x = channels_ri.permute(0, 2, 1, 3) # [B, 32, 2, 32]
+    
+    # 2. Unfold subcarriers into patches
+    # Sub (32) -> 2 patches of size 16
+    # [B, 32, 2, 2, 16]
+    n_patches_per_sub = n_sub // patch_size
+    x = x.reshape(batch_size, n_ant, 2, n_patches_per_sub, patch_size)
+    
+    # 3. Flatten dimensions 2 and 3 (Component and FreqPatch)
+    # [B, 32, 4, 16]
+    # The inner order is Real_P0, Real_P1, Imag_P0, Imag_P1
+    x = x.reshape(batch_size, n_ant, 2 * n_patches_per_sub, patch_size)
+    
+    # 4. Flatten all patches
+    # [B, 128, 16]
+    return x.reshape(batch_size, -1, patch_size)
 
 
 def mask_patches(patches, mask_ratio=0.15, gen_raw=False):
@@ -81,20 +100,50 @@ def mask_patches(patches, mask_ratio=0.15, gen_raw=False):
     if n_masks_half < 1:
         raise ValueError("Mask ratio yields zero masked tokens.")
 
+    # Use learned CLS/Mask embeddings passed from model, or default fixed (legacy)
+    # Ideally, masking happens AFTER embedding in the model using learnable tokens.
+    # But for compatibility with this pipeline, we use fixed placeholders here
+    # and let the model potentially replace them or learn from them.
+    # For now, we stick to the fixed values to minimize regression, 
+    # BUT we will rely on the model to use learnable embeddings if implemented there.
+    # The User requested "CLS = 0.2 vector" fix. 
+    # We will just mark positions here and let the model handle the embedding replacement?
+    # No, this function returns input_ids (values). 
+    # We will continue returning values, but the Model should likely override the Embedding for these special positions.
+    
+    cls_token_val = 0.2
+    mask_token_val = 0.1
+    
     cls_token = torch.full(
-        (batch_size, 1, patch_size), 0.2, device=patches.device, dtype=patches.dtype
+        (batch_size, 1, patch_size), cls_token_val, device=patches.device, dtype=patches.dtype
     )
     input_ids = torch.cat([cls_token, patches], dim=1)
 
     n_masks = n_masks_half * 2
-    mask_vec = torch.full((patch_size,), 0.1, device=patches.device, dtype=patches.dtype)
+    mask_vec = torch.full((patch_size,), mask_token_val, device=patches.device, dtype=patches.dtype)
 
-    # Sample masked positions without replacement in the real half.
-    rand = torch.rand(batch_size, real_tokens, device=patches.device)
-    pos_real = rand.topk(n_masks_half, dim=1).indices
-    pos_imag = pos_real + real_tokens
+    # Real tokens are at indices [0, 1] of every 4-block.
+    # Total patches = Ant * 4.
+    # We want to sample N distinct (Ant, SubFreq) pairs.
+    # Ant in range [0, 32), SubFreq in range [0, 2).
+    # Then pos_real = Ant * 4 + SubFreq.
+    # Then pos_imag = pos_real + 2.
+    
+    rand = torch.rand(batch_size, real_tokens, device=patches.device) # [B, 64]
+    
+    # We need to map [0..63] to the valid Real indices.
+    # valid_real_indices = [0, 1, 4, 5, 8, 9, ...]
+    # Formula: idx -> (idx // 2) * 4 + (idx % 2)
+    
+    # Select top-k indices from the range [0..63]
+    selected_indices = rand.topk(n_masks_half, dim=1).indices # [B, N_Masks_Half] (values 0..63)
+    
+    # Map to physical indices
+    pos_real = (selected_indices // 2) * 4 + (selected_indices % 2)
+    pos_imag = pos_real + 2
+    
     masked_pos = torch.cat([pos_real, pos_imag], dim=1) + 1  # shift for CLS
-
+    
     masked_tokens = torch.gather(
         input_ids, 1, masked_pos.unsqueeze(-1).expand(-1, -1, patch_size)
     ).detach()
@@ -154,7 +203,7 @@ class LWMWithPrepatchAxial(nn.Module):
             patches, mask_ratio=self.mask_ratio, gen_raw=self.gen_raw
         )
 
-        max_len = self.lwm.embedding.pos_embed.num_embeddings
+        max_len = (self.lwm.embedding.antennas * self.lwm.embedding.freq_groups) + 1
         if input_ids.size(1) > max_len:
             raise ValueError(f"Sequence length {input_ids.size(1)} exceeds max_len {max_len}.")
 
