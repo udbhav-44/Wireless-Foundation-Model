@@ -1,6 +1,6 @@
 # CA-LWM Training & Benchmarking
 
-This folder contains training, inference utilities, and benchmarking scripts for a **Coordinate-Attention (CA) augmented Lightweight Wireless Model (LWM)**. It includes:
+This folder contains training, inference utilities, and benchmarking scripts for a **Coordinate-Attention (CA) augmented Large Wireless Model (LWM)**. It includes:
 - End-to-end CA + LWM pretraining using a torch-native patching pipeline.
 - Benchmarking against a base LWM on downstream tasks (LoS/NLoS, Beam Prediction).
 - Plotting helpers for benchmark results.
