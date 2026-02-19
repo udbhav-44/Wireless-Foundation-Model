@@ -83,139 +83,49 @@ def parse_args():
     parser.add_argument("--channels-cache", type=str, default=None)
     parser.add_argument("--save-path", type=str, default="lwm_axial/model_weights_axial_ddp.pth")
     parser.add_argument("--save-every", type=int, default=0)
+    parser.add_argument("--resume", type=str, default=None, help="Path to checkpoint to resume from")
     return parser.parse_args()
 
-def load_channels_ri(scenarios, dataset_folder=None, cache_path=None, rank=0):
-    # Only Rank 0 prints details
-    if cache_path:
-        cache_path = os.path.expanduser(cache_path)
-        if os.path.exists(cache_path) or (not cache_path.endswith(".npy") and os.path.exists(cache_path + ".npy")):
-            if rank == 0: print(f"Loading cached channels from {cache_path}")
-            return np.load(cache_path if os.path.exists(cache_path) else cache_path + ".npy")
-    
-    if rank == 0: print("Loading data from scenarios...")
-    data = []
-    for name in scenarios:
-        deepmimo_data = DeepMIMO_data_gen(name, dataset_folder=dataset_folder)
-        cleaned = deepmimo_data_cleaning(deepmimo_data)
-        data.append(cleaned)
-    channels = np.vstack(data)
-    real = channels.real.astype(np.float32)
-    imag = channels.imag.astype(np.float32)
-    channels_ri = np.stack([real, imag], axis=1)
-    
-    if cache_path and rank == 0:
-        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-        np.save(cache_path, channels_ri)
-        print(f"Cached channels to {cache_path}")
+def load_checkpoint(model, optimizer, scheduler, scaler, filename, set_lr=None):
+    if os.path.isfile(filename):
+        print(f"Loading checkpoint '{filename}'")
+        checkpoint = torch.load(filename, map_location="cpu")
         
-    return channels_ri
-
-def split_data(dataset, train_ratio, val_ratio, seed=0):
-    train_size = int(train_ratio * len(dataset))
-    val_size = int(val_ratio * len(dataset))
-    test_size = len(dataset) - val_size - train_size
-    generator = torch.Generator().manual_seed(seed)
-    return torch.utils.data.random_split(dataset, [train_size, val_size, test_size], generator=generator)
-
-def train_epoch(model, dataloader, optimizer, scheduler, device, amp, scaler, log_interval, log_fn, writer, epoch_idx, rank, grad_clip, scheduler_step_per_batch, world_size):
-    model.train()
-    running_loss = 0.0
-    criterion = nn.MSELoss()
-    
-    # Wait for all processes to start epoch
-    if dist.is_initialized():
-        dataloader.sampler.set_epoch(epoch_idx)
-
-    end = time.perf_counter()
-    log_loss = 0.0
-    log_data_time = 0.0
-    log_step_time = 0.0
-    
-    for step, (channels,) in enumerate(dataloader):
-        data_time = time.perf_counter() - end
-        log_data_time += data_time
+        # Determine if checkpoint has DDP wrapper prefix or not
+        # Our save logic uses model.module.state_dict(), so keys shouldn't have 'module.' prefix.
+        # But if we wrapped model in DDP BEFORE loading, DDP expects 'module.' prefix?
+        # Actually, DDP(model).load_state_dict() expects 'module.name'.
+        # But we saved model.module.state_dict() (clean weights).
+        # So we should load into model.module (the inner model).
         
-        channels = channels.to(device, non_blocking=True)
+        # Current model is DDP(model). Inner is model.module.
+        model.module.load_state_dict(checkpoint if "state_dict" not in checkpoint else checkpoint["state_dict"])
         
-        if device.type == "cuda":
-            torch.cuda.synchronize()
-        start = time.perf_counter()
-        
-        optimizer.zero_grad(set_to_none=True)
-        with torch.amp.autocast('cuda', enabled=amp):
-            logits_lm, masked_tokens, _ = model(channels)
-            loss = criterion(logits_lm, masked_tokens) / torch.var(masked_tokens)
-        
-        if scaler is not None:
-            scaler.scale(loss).backward()
-            if grad_clip > 0:
-                scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-            scaler.step(optimizer)
-            scaler.update()
-        else:
-            loss.backward()
-            if grad_clip > 0:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-            optimizer.step()
-
-        if scheduler and scheduler_step_per_batch:
-            scheduler.step()
-
-        if device.type == "cuda":
-            torch.cuda.synchronize()
-        step_time = time.perf_counter() - start
-        log_step_time += step_time
-
-        # Reduce loss for logging
-        loss_val = loss.item()
-        if dist.is_initialized():
-            loss_tensor = torch.tensor(loss_val, device=device)
-            dist.all_reduce(loss_tensor)
-            loss_val = loss_tensor.item() / world_size
-
-        running_loss += loss_val
-        log_loss += loss_val
-        
-        if rank == 0 and log_interval and (step + 1) % log_interval == 0:
-            avg_loss = log_loss / log_interval
-            avg_data = log_data_time / log_interval
-            avg_step = log_step_time / log_interval
-            throughput = (args.batch_size * world_size) / avg_step # Samples per second based on step time (processing)
-            # OR total throughput including data wait:
-            # throughput = (args.batch_size * world_size * log_interval) / (time.perf_counter() - (end - data_time)) 
-            # Original uses pure step time or total time? 
-            # Original: throughput = log_samples / log_step_time. (Pure processing speed). 
-            # I will stick to pure Step Time for throughput to show GPU speed, but Total Time is also useful.
-            # Let's use the interval time for "real world" throughput.
+        start_epoch = 0
+        if "epoch" in checkpoint:
+            start_epoch = checkpoint["epoch"] + 1
             
-            # Re-calculating end-to-end throughput for honesty
-            # But let's match original script style:
-            # f"data {avg_data * 1000:.1f} ms | step {avg_step * 1000:.1f} ms"
+        if "optimizer" in checkpoint and optimizer:
+            optimizer.load_state_dict(checkpoint["optimizer"])
             
-            log_fn(
-                f"  step {step + 1:>5}/{len(dataloader)} | "
-                f"loss {avg_loss:.4f} | "
-                f"data {avg_data * 1000:.1f} ms | "
-                f"step {avg_step * 1000:.1f} ms | "
-                f"{throughput:.1f} samples/s"
-            )
+        if "scheduler" in checkpoint and scheduler:
+            scheduler.load_state_dict(checkpoint["scheduler"])
             
-            if writer:
-                global_step = epoch_idx * len(dataloader) + step + 1
-                writer.add_scalar("train/loss_step", avg_loss, global_step)
-                writer.add_scalar("train/data_time_ms", avg_data * 1000, global_step)
-                writer.add_scalar("train/step_time_ms", avg_step * 1000, global_step)
-                writer.add_scalar("train/throughput", throughput, global_step)
-
-            log_loss = 0.0
-            log_data_time = 0.0
-            log_step_time = 0.0
+        if "scaler" in checkpoint and scaler:
+            scaler.load_state_dict(checkpoint["scaler"])
             
-        end = time.perf_counter()
-
-    return running_loss / len(dataloader)
+        print(f"Loaded checkpoint '{filename}' (epoch {start_epoch})")
+        
+        # Override LR if requested
+        if set_lr is not None:
+            print(f"Forcing Learning Rate to {set_lr}")
+            for param_group in optimizer.param_groups:
+                param_group['lr'] = set_lr
+                
+        return start_epoch
+    else:
+        print(f"No checkpoint found at '{filename}'")
+        return 0
 
 def main():
     global args
@@ -251,6 +161,16 @@ def main():
     optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scheduler = StepLR(optimizer, step_size=args.step_size, gamma=args.gamma)
     scaler = torch.amp.GradScaler('cuda', enabled=args.amp)
+    
+    start_epoch = 0
+    if args.resume:
+        # If user passed --lr explicit, we use that. 
+        # But args.lr is default=1e-4 or whatever.
+        # How to know if user explicitly set it? argparse gives default.
+        # We assume if they are resuming, and passed --lr to the command line, they want that LR.
+        # If they didn't pass --lr, they get the default (5e-5 or 1e-4).
+        # We will set_lr = args.lr.
+        start_epoch = load_checkpoint(model, optimizer, scheduler, scaler, args.resume, set_lr=args.lr)
     
     # Logging
     log_fp = None
