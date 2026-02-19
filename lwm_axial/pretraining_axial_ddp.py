@@ -202,7 +202,7 @@ def main():
     if args.torch_compile: # Compile before DDP usually better
         model = torch.compile(model, mode=args.compile_mode)
         
-    model = DDP(model, device_ids=[local_rank])
+    model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
     
     optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scheduler = StepLR(optimizer, step_size=args.step_size, gamma=args.gamma)
