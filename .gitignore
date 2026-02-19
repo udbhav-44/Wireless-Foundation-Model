@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+*.log
+
+# Experiment outputs
+runs/
+results/
+
+# Data artifacts
+*.npy
+*.npz
+*.pt
+*.ckpt
+
+# OS files
+.DS_Store
