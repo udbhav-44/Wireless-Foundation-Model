@@ -82,6 +82,16 @@ def load_channels_ri(scenarios, dataset_folder=None, cache_path=None, rank=0):
         print(f"Cached channels to {cache_path}")
     return channels_ri
 
+def split_data(dataset, train_ratio, val_ratio, seed=0):
+    """Split dataset into train, val, test sets."""
+    train_size = int(train_ratio * len(dataset))
+    val_size = int(val_ratio * len(dataset))
+    test_size = len(dataset) - val_size - train_size
+    generator = torch.Generator().manual_seed(seed)
+    return torch.utils.data.random_split(
+        dataset, [train_size, val_size, test_size], generator=generator
+    )
+
 def default_num_workers():
     return 8
 
