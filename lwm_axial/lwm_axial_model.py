@@ -168,33 +168,32 @@ class EncoderLayer(nn.Module):
 
     def forward(self, enc_inputs):
         # Pre-Norm Architecture: x = x + Attn(Norm(x))
-        # Split CLS and Grid
-        cls_token = enc_inputs[:, :1, :]  # [B, 1, D]
-        grid_tokens = enc_inputs[:, 1:, :]  # [B, 128, D]
-        
         norm_inputs = self.norm(enc_inputs)
         cls_out, grid_out = self.enc_self_attn(norm_inputs)
         
-        # Apply CLS mixing + residuals (Issue 3 fix, corrected order)
-        # Step 1: Update CLS with grid mean
+        # Step 1: Rebuild delta same shape as enc_inputs
         if cls_out is not None:
-            cls_token = cls_token + cls_out  # [B, 1, D] - updated CLS
-            # Step 2: Update Grid with attention output
-            grid_tokens = grid_tokens + grid_out  # [B, 128, D]
-            # Step 3: Global mixing - add UPDATED CLS to grid
-            grid_tokens = grid_tokens + cls_token  # [B, 128, D]
+            delta = torch.cat([cls_out, grid_out], dim=1)  # [B, 129, D]
         else:
-            grid_tokens = grid_tokens + grid_out
-            
-        # Recombine
-        enc_outputs = torch.cat([cls_token, grid_tokens], dim=1)
+            # If no CLS, grid_out is the full delta
+            delta = grid_out
+        
+        # Step 2: Standard Pre-Norm residual on FULL tensor
+        enc_outputs = enc_inputs + delta
+        
+        # Step 3: CLS mixing on POST-RESIDUAL tokens
+        if cls_out is not None:
+            cls = enc_outputs[:, :1, :]   # [B, 1, D] - updated CLS
+            grid = enc_outputs[:, 1:, :]  # [B, 128, D]
+            grid = grid + cls  # Global context propagation
+            enc_outputs = torch.cat([cls, grid], dim=1)
         
         # FFN (same Pre-Norm pattern)
         norm_outputs = self.norm(enc_outputs)
         ffn_outputs = self.pos_ffn(norm_outputs)
         
-        enc_outputs = enc_outputs + ffn_outputs # Residual 2
-        return enc_outputs, None  # attn is not used
+        enc_outputs = enc_outputs + ffn_outputs  # Residual 2
+        return enc_outputs, None
 
 class lwm(torch.nn.Module):
     def __init__(self, element_length=16, d_model=64, max_len=129, n_layers=12):
