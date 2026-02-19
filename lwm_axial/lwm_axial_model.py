@@ -175,12 +175,14 @@ class EncoderLayer(nn.Module):
         norm_inputs = self.norm(enc_inputs)
         cls_out, grid_out = self.enc_self_attn(norm_inputs)
         
-        # Apply CLS mixing + residuals (Issue 3 fix)
-        # CLS update: add grid mean
+        # Apply CLS mixing + residuals (Issue 3 fix, corrected order)
+        # Step 1: Update CLS with grid mean
         if cls_out is not None:
-            cls_token = cls_token + cls_out  # [B, 1, D]
-            # Grid update: add attention output + broadcast CLS
-            grid_tokens = grid_tokens + grid_out + cls_out  # [B, 128, D]
+            cls_token = cls_token + cls_out  # [B, 1, D] - updated CLS
+            # Step 2: Update Grid with attention output
+            grid_tokens = grid_tokens + grid_out  # [B, 128, D]
+            # Step 3: Global mixing - add UPDATED CLS to grid
+            grid_tokens = grid_tokens + cls_token  # [B, 128, D]
         else:
             grid_tokens = grid_tokens + grid_out
             
