@@ -47,6 +47,41 @@ def cleanup_ddp():
     if dist.is_initialized():
         dist.destroy_process_group()
 
+def load_channels_ri(scenarios, dataset_folder=None, cache_path=None, rank=0):
+    """Load or generate channels data, with caching support."""
+    if cache_path:
+        cache_path = os.path.expanduser(cache_path)
+        load_path = cache_path
+        if not os.path.exists(load_path):
+            if not load_path.endswith(".npy") and os.path.exists(load_path + ".npy"):
+                load_path = load_path + ".npy"
+            else:
+                load_path = None
+        if load_path:
+            if rank == 0:
+                print(f"Loading cached channels from {load_path}")
+            return np.load(load_path)
+
+    if rank == 0:
+        print("Loading data from scenarios...")
+    data = []
+    for name in scenarios:
+        deepmimo_data = DeepMIMO_data_gen(name, dataset_folder=dataset_folder)
+        cleaned = deepmimo_data_cleaning(deepmimo_data)
+        data.append(cleaned)
+    channels = np.vstack(data)
+    real = channels.real.astype(np.float32)
+    imag = channels.imag.astype(np.float32)
+    channels_ri = np.stack([real, imag], axis=1)
+    if cache_path and rank == 0:
+        cache_path = os.path.expanduser(cache_path)
+        cache_dir = os.path.dirname(cache_path)
+        if cache_dir:
+            os.makedirs(cache_dir, exist_ok=True)
+        np.save(cache_path, channels_ri)
+        print(f"Cached channels to {cache_path}")
+    return channels_ri
+
 def default_num_workers():
     return 8
 
